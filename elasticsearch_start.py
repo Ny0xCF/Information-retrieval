@@ -1,5 +1,6 @@
 from elasticsearch import Elasticsearch
 from beautifultable import BeautifulTable
+from wiki_ru_wordnet import WikiWordnet
 import time
 import json
 import scrapy_parse
@@ -8,11 +9,13 @@ import scrapy_parse
 class Robot:
     def __init__(self):
         self.es = Elasticsearch()
+        self.ww = WikiWordnet()
         self.json_path = scrapy_parse.start_parse()
+        self.index_name = 'news'
 
     def create_index(self):
         self.es.indices.create(
-            index='news',
+            index=self.index_name,
             body={
                 'settings': {
                     'number_of_shards': 1,
@@ -22,17 +25,13 @@ class Robot:
                             'ru_stop': {
                                 'type': 'stop',
                                 'stopwords': '_russian_'
-                            },
-                            'ru_stemmer': {
-                                'type': 'stemmer',
-                                'language': 'russian'
                             }
                         },
                         'analyzer': {
                             'default': {
                                 'char_filter': ['html_strip'],
                                 'tokenizer': 'standard',
-                                'filter': ['lowercase', 'ru_stop', 'ru_stemmer']
+                                'filter': ['lowercase', 'ru_stop']
                             }
                         }
                     }
@@ -44,11 +43,27 @@ class Robot:
     def add_to_index(self):
         with open(self.json_path, 'r') as input_stream:
             data = json.loads(input_stream.read())
-            i = 1
+            k = 1
             for item in data:
-                self.es.index(index='news', id=i, body=item)
+                self.es.index(index=self.index_name, id=k, body=item)
                 time.sleep(0.2)
-                i += 1
+                k += 1
+
+    def add_synonyms(self, query):
+        tmp_list = list()
+        result_tokens = self.es.indices.analyze(index=self.index_name, body={
+            'analyzer': 'default',
+            'text': [query]
+        })
+        for token in result_tokens['tokens']:
+            tmp_list.append(token['token'])
+            syn_sets = self.ww.get_synsets(token['token'])
+            if syn_sets:
+                for synonym in syn_sets[0].get_words():
+                    word = synonym.lemma()
+                    if tmp_list.count(word) == 0:
+                        tmp_list.append(word)
+        return ' '.join(tmp_list)
 
     def find_by(self, find_option, query):
         fields_list = ['title']
@@ -101,7 +116,9 @@ if __name__ == '__main__':
             my_robot.delete_indices()
             exit(0)
         elif option in ['1', '2', '3']:
-            result = my_robot.find_by(option, input('\nВведите фразу или предложение: '))
+            new_query = my_robot.add_synonyms(input('\nВведите фразу или предложение: '))
+            print(f'\nВыполняю поиск по словам: {new_query}')
+            result = my_robot.find_by(option, new_query)
 
             hits_len = len(result['hits']['hits'])
             print('Всего совпадений:', hits_len)
